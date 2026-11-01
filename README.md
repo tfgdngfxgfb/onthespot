@@ -1,3 +1,5 @@
+> **Independent FLAC_24 fork based on v2.0.3.** See [local setup and Deezer policy](DEVELOPMENT.md) and [validation status](docs/FORK_STATUS.md).
+
 <div align="center">
 
 <div style="text-align: center;">

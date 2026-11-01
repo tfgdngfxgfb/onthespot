@@ -26,6 +26,7 @@ import string
 import subprocess
 import threading
 import time
+from functools import wraps
 from hashlib import md5
 from io import BytesIO
 from urllib.parse import urlparse
@@ -72,7 +73,7 @@ def _get_host_lock(url):
     with _api_host_locks_guard:
         lock = _api_host_locks.get(host)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _api_host_locks[host] = lock
         return lock
 
@@ -189,6 +190,17 @@ class SSLAdapter(requests.adapters.HTTPAdapter):  # ty: ignore[possibly-missing-
         return super().init_poolmanager(*args, ssl_context=context, **kwargs)
 
 
+def _serialize_provider_call(function):
+    @wraps(function)
+    def serialized(url, *args, **kwargs):
+        # Keep the cache commit in the same critical section as the request.
+        # Otherwise the next caller can dispatch before the first writes cache.
+        with _get_host_lock(url):
+            return function(url, *args, **kwargs)
+    return serialized
+
+
+@_serialize_provider_call
 def make_call(
     url,
     params=None,
@@ -1026,7 +1038,7 @@ def embed_metadata(item, metadata):
 # ---------------------------------------------------------------------------
 
 
-def set_music_thumbnail(filename, metadata):
+def set_music_thumbnail(filename, metadata, allow_embed=True):
     """Download the album artwork and embed or save it alongside *filename*.
 
     Supports MP3, FLAC, OGG, and most common audio containers.
@@ -1056,12 +1068,12 @@ def set_music_thumbnail(filename, metadata):
     _save_image(img, image_path, format)
 
     if not config.get("raw_media_download"):
-        if config.get("embed_cover") and config.get("windows_10_explorer_thumbnails"):
+        if allow_embed and config.get("embed_cover") and config.get("windows_10_explorer_thumbnails"):
             # music_tag renders covers visible in Windows Explorer; raw
             # mutagen/ffmpeg do not in this mode.
             _embed_with_music_tag(filename, image_path)
 
-        elif config.get("embed_cover") and filetype not in (".wav", ".ogg"):
+        elif allow_embed and config.get("embed_cover") and filetype not in (".wav", ".ogg"):
             if os.path.isfile(temp_name):
                 os.remove(temp_name)
 
@@ -1102,7 +1114,7 @@ def set_music_thumbnail(filename, metadata):
             else:
                 subprocess.check_call(command, shell=False, stdin=subprocess.DEVNULL)
 
-        elif config.get("embed_cover") and filetype == ".ogg":
+        elif allow_embed and config.get("embed_cover") and filetype == ".ogg":
             _embed_with_music_tag(filename, image_path)
 
         if os.path.exists(temp_name):

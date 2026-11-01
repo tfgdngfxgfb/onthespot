@@ -89,7 +89,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   /* Unified Dynamic Input Renderer                                           */
   /* ------------------------------------------------------------------------ */
 
-  const renderInput = (field) => {
+  type SettingsField = {
+    key: string; label: string; type: string; description?: string;
+    min?: number; max?: number; step?: number | string; defaultValue?: string | number | boolean;
+    placeholder?: string; isFloat?: boolean; isNumber?: boolean; delimiter?: string;
+    options?: { value: string | number; label: string }[];
+  };
+
+  const renderInput = (field: SettingsField) => {
     const rawVal = config[field.key];
 
     switch (field.type) {
@@ -150,7 +157,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
               }}
               className={inputClass}
             >
-              {field.options.map((opt) => (
+              {(field.options || []).map((opt) => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}
                 </option>

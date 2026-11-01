@@ -18,9 +18,8 @@ from .api.crunchyroll import (
     crunchyroll_get_mpd_info,
 )
 from .api.deezer import (
+    blowfishDecrypt,
     calcbfkey,
-    decryptfile,
-    genurlkey,
     get_song_info_from_deezer_website,
 )
 from .api.qobuz import qobuz_get_file_url
@@ -28,10 +27,16 @@ from .api.spotify import reinit_spotify_session
 from .api.tidal import tidal_get_mpd_data
 from .basemodels import QueueItem
 from .constants import ItemStatus
+from .deezer_lossless import download_lossless, inspect_flac
 from .otsconfig import config
 from .resources.exceptions import DownloadCancelled, TrackUnavailableError
-from .runtimedata import get_logger, progress_hook, wait_for_download_resume, yt_dlp_progress_hook
-from .utils import requeue_item, run_ffmpeg
+from .runtimedata import (
+    get_logger,
+    progress_hook,
+    wait_for_download_resume,
+    yt_dlp_progress_hook,
+)
+from .utils import run_ffmpeg
 from .youtube_auth import is_youtube_url, youtube_ydl_options
 
 logger = get_logger("services_middleware")
@@ -133,113 +138,27 @@ def download_spotify(item: QueueItem, item_id, item_type, token, temp_path):
     return default_format, bitrate
 
 
-def _select_deezer_quality(song, item: QueueItem):
-    """
-    Selects the best fitting format given the preferred profile and available ones.
-
-    Cascades from best to worst in case of unavailability
-    """
-    if item.download_profile.bitrate > 1000 and int(song.get("FILESIZE_FLAC", 0)) > 0:
-        return 9, "FLAC", "1411k", ".flac"
-
-    if item.download_profile.bitrate > 256 and int(song.get("FILESIZE_MP3_320", 0)) > 0:
-        return 5, "MP3_320", "320k", ".mp3"
-
-    if item.download_profile.bitrate > 129 and int(song.get("FILESIZE_MP3_256", 0)) > 0:
-        return 3, "MP3_256", "256k", ".mp3"
-
-    return 1, "MP3_128", "128k", ".mp3"
-
-
 def download_deezer(item: QueueItem, item_id, token, temp_path):
-    song = get_song_info_from_deezer_website(token, item_id)
+    """Fetch the highest offered FLAC, independently of nominal output bitrate."""
+    def check_cancelled():
+        wait_for_download_resume(item)
+        if item.item_status == ItemStatus.CANCELLED:
+            raise DownloadCancelled("Download cancelled by user.")
 
-    if item.download_format in ["mp3", "flac"]:
-        song_quality, song_format, bitrate, default_format = _select_deezer_quality(song, item)
-    else:
-        if int(song.get("FILESIZE_FLAC", 0)) > 0:
-            song_quality, song_format, bitrate, default_format = 9, "FLAC", "1411k", ".flac"
-        elif int(song.get("FILESIZE_MP3_320", 0)) > 0:
-            song_quality, song_format, bitrate = 3, "MP3_320", "320k"
-        elif int(song.get("FILESIZE_MP3_256", 0)) > 0:
-            song_quality, song_format, bitrate = 5, "MP3_256", "256k"
-        else:
-            song_quality, song_format, bitrate, default_format = 1, "MP3_128", "128k", ".mp3"
+    def progress(received, total):
+        percent = min(49, 25 + int(24 * received / total)) if total else 25
+        progress_hook(item, percent, ItemStatus.DOWNLOADING,
+                      downloaded_bytes=received, total_bytes=total)
 
-    temp_path += default_format
-
-    headers = {
-        "Origin": "https://www.deezer.com",
-        "Accept-Encoding": "utf-8",
-        "Referer": "https://www.deezer.com/login",
-    }
-    track_data = (
-        token["session"]
-        .post(
-            "https://media.deezer.com/v1/get_url",
-            json={
-                "license_token": token["license_token"],
-                "media": [
-                    {
-                        "type": "FULL",
-                        "formats": [{"cipher": "BF_CBC_STRIPE", "format": song_format}],
-                    }
-                ],
-                "track_tokens": [song["TRACK_TOKEN"]],
-            },
-            headers=headers,
-        )
-        .json()
+    key = calcbfkey(str(item_id))
+    quality = download_lossless(
+        token, item_id, temp_path + ".flac",
+        lambda: get_song_info_from_deezer_website(token, item_id),
+        lambda block: blowfishDecrypt(block, key), check_cancelled, progress,
+        validator=lambda path: inspect_flac(path, config.get("_ffmpeg_bin_path")),
     )
-
-    try:
-        logger.debug(track_data)
-        url = track_data["data"][0]["media"][0]["sources"][0]["url"]
-    except KeyError as exc:
-        logger.error(
-            "Unable to select Deezer quality %s for track %s , defaulting to 128k MP3. Error: %s",
-            song_quality,
-            song["SNG_ID"],
-            str(exc),
-        )
-        song_quality = 1
-        song_format = "MP3_128"
-        bitrate = "128k"
-        default_format = ".mp3"
-        url_key = genurlkey(song["SNG_ID"], song["MD5_ORIGIN"], song["MEDIA_VERSION"], song_quality)
-        url = f"https://e-cdns-proxy-{song['MD5_ORIGIN'][0]}.dzcdn.net/mobile/1/{url_key.decode()}"
-
-    response = requests.get(url, stream=True, timeout=60)
-    if response.status_code != 200:
-        logger.info("Deezer download failed %s", response.status_code)
-        item.item_status = ItemStatus.FAILED
-        requeue_item(item)
-        return default_format, bitrate
-
-    total_size = int(response.headers.get("content-length", 0))
-    downloaded = 0
-    data_chunks = b""
-
-    for chunk in response.iter_content(chunk_size=config.get("download_chunk_size")):
-        downloaded += len(chunk)
-        data_chunks += chunk
-        if downloaded != total_size:
-            if item.item_status == ItemStatus.CANCELLED:
-                raise DownloadCancelled("Download cancelled by user.")
-            progress_hook(
-                item,
-                int((downloaded / total_size) * 100),
-                ItemStatus.DOWNLOADING,
-                downloaded_bytes=downloaded,
-                total_bytes=total_size,
-            )
-
-    bf_key = calcbfkey(song["SNG_ID"])
-    progress_hook(item, 99, ItemStatus.DECRYPTING)
-    with open(temp_path, "wb") as out_file:
-        decryptfile(data_chunks, bf_key, out_file)
-
-    return default_format, bitrate
+    logger.info("Verified Deezer source for %s: %s", item_id, quality.description)
+    return ".flac", str(round(quality.bits * quality.rate * quality.channels / 1000)) + "k"
 
 
 def download_via_ytdlp_audio(item: QueueItem, item_metadata, service, item_id, token, temp_path, item_type):

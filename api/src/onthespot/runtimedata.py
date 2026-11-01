@@ -273,20 +273,29 @@ def format_bytes(value: float | None) -> str:
     return f"{amount:.1f} {units[unit]}"
 
 
-def wait_for_download_resume(item: dict) -> None:
-    """Block an active worker while global or per-item pause is enabled."""
+def wait_for_download_resume(item) -> None:
+    """Keep dict callers and QueueItem callers cancellable while paused."""
+    def value(key, default=None):
+        return item.get(key, default) if isinstance(item, dict) else getattr(item, key, default)
+
+    def status(new_status):
+        if isinstance(item, dict):
+            item["item_status"] = new_status
+            websocket_event("STATUS_CHANGE", item)
+        else:
+            item.item_status = new_status
+            websocket_event("STATUS_CHANGE", item.model_dump())
+
     was_paused = False
-    while download_paused.is_set() or item.get("_pause_requested"):
-        if item.get("item_status") == ItemStatus.CANCELLED:
+    while download_paused.is_set() or value("_pause_requested"):
+        if value("item_status") == ItemStatus.CANCELLED:
             raise DownloadCancelled("Download cancelled while paused.")
         if not was_paused:
-            item["item_status"] = ItemStatus.PAUSED
-            websocket_event("STATUS_CHANGE", item)
+            status(ItemStatus.PAUSED)
             was_paused = True
         time.sleep(0.2)
-    if was_paused and item.get("item_status") != ItemStatus.CANCELLED:
-        item["item_status"] = ItemStatus.DOWNLOADING
-        websocket_event("STATUS_CHANGE", item)
+    if was_paused and value("item_status") != ItemStatus.CANCELLED:
+        status(ItemStatus.DOWNLOADING)
 
 
 def update_download_telemetry(

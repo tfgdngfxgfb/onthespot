@@ -885,7 +885,7 @@ export const DownloadQueue: React.FC<DownloadQueueProps> = ({
                                 Bitrate & Depth
                               </span>
                               <span className="font-mono font-medium text-neutral-800 dark:text-neutral-200 mt-0.5 block">
-                                {selectedItem.bitrate + "kbps"}
+                                {selectedItem.source_quality || selectedItem.bitrate + "kbps"}
                               </span>
                             </div>
 

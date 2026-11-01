@@ -1,18 +1,20 @@
 import html.parser
 import json
-import random
 import re
 import uuid
 from binascii import a2b_hex, b2a_hex
+from urllib.parse import urlsplit
 
 import requests
 from Cryptodome.Cipher import AES, Blowfish
 from Cryptodome.Hash import MD5
 
 from ..constants import HTTP_TIMEOUT
+from ..deezer_metadata import normalize_metadata
 from ..otsconfig import config
+from ..resources.exceptions import TrackUnavailableError
 from ..runtimedata import account_pool, get_logger
-from ..utils import conv_list_format, make_call
+from ..utils import make_call
 
 logger = get_logger("api.deezer")
 BASE_URL = "https://api.deezer.com"
@@ -52,12 +54,28 @@ def deezer_add_account(arl):
     config.save()
 
 
+def _all_rows(page):
+    rows = list(page.get("data") or [])
+    seen = set()
+    while page.get("next"):
+        url = page["next"]
+        if url in seen:
+            raise ValueError("Deezer pagination loop detected.")
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or parsed.hostname != "api.deezer.com":
+            raise ValueError("Unexpected Deezer pagination host.")
+        seen.add(url)
+        page = make_call(url)
+        rows.extend(page.get("data") or [])
+    return rows
+
+
 def deezer_get_album_track_ids(_, album_id):
     logger.info(f"Getting tracks from album: {album_id}")
     album_data = make_call(f"{BASE_URL}/album/{album_id}?limit=10000")
     item_ids = []
-    for track in album_data.get("tracks", {}).get("data", []):
-        item_ids.append(track.get("id"))
+    for track in _all_rows(album_data.get("tracks") or {}):
+        item_ids.append(str(track["id"]))
     return item_ids
 
 
@@ -65,8 +83,8 @@ def deezer_get_artist_album_ids(_, artist_id):
     logger.info(f"Getting album ids for artist: '{artist_id}'")
     album_data = make_call(f"{BASE_URL}/artist/{artist_id}/albums?limit=10000")
     item_ids = []
-    for album in album_data.get("data", []):
-        item_ids.append(album.get("id"))
+    for album in _all_rows(album_data):
+        item_ids.append(str(album["id"]))
     return item_ids
 
 
@@ -78,73 +96,41 @@ def deezer_get_playlist_data(_, playlist_id):
     playlist_by = playlist_data.get("creator", {}).get("name")
 
     track_ids = []
-    for track in playlist_data.get("tracks", {}).get("data", []):
-        track_ids.append(track.get("id"))
+    for track in _all_rows(playlist_data.get("tracks") or {}):
+        track_ids.append(str(track["id"]))
     return playlist_name, playlist_by, track_ids
 
 
 def deezer_get_track_metadata(_, item_id, item):
-    logger.info(f"Get track info for: '{item_id}'")
-
-    track_data = make_call(f"{BASE_URL}/track/{item_id}")
-    album_data = make_call(f"{BASE_URL}/album/{track_data.get('album', {}).get('id')}?limit=10000")
-    album_tracks = make_call(f"{BASE_URL}/album/{track_data.get('album', {}).get('id')}/tracks?limit=10000")
-    # album_page = make_call(f"https://www.deezer.com/album/{track_data.get('album', {}).get('id')}", text=True)
-
-    # Fetch track_number
-    track_number = None
-    for i, track in enumerate(album_data.get("tracks", {}).get("data", [])):
-        if track.get("id") == int(item_id):
-            track_number = i + 1
-            break
-    if not track_number:
-        track_number = track_data.get("track_position")
-
-    # Total Discs
-    try:
-        total_discs = album_tracks.get("data", [])[-1].get("disk_number")
-    except Exception:
-        total_discs = track_data.get("disk_number")
-
-    # Artists
-    artists = []
-    for artist in track_data.get("contributors"):
-        artists.append(artist.get("name"))
-
-    info = {}
-    info["title"] = track_data.get("title")
-    info["isrc"] = track_data.get("isrc")
-    info["item_url"] = track_data.get("link")
-    info["length"] = str(track_data.get("duration")) + "000"
-    # Deezer api does not return total_tracks only position so on a
-    # second disc the number will be, for instance, 1/24 instead of 13/24.
-    # I opted to iterate through the list instead as seen above.
-    # info['track_number'] = track_data.get('track_position')
-    info["track_number"] = track_number
-    info["total_tracks"] = len(album_data.get("tracks", {}).get("data", []))
-    # Deezer returns disc number but not total discs
-    # so it is scraped from the album_tracks, can
-    # alternatively scrape album page.
-    info["disc_number"] = track_data.get("disk_number")
-    info["total_discs"] = total_discs
-    info["release_year"] = track_data.get("release_date").split("-")[0]
-    info["explicit"] = track_data.get("explicit_lyrics")
-    info["bpm"] = track_data.get("bpm")
-    info["artists"] = conv_list_format(artists)
-    info["image_url"] = track_data.get("album", {}).get("cover_xl")
-    info["album_artists"] = album_data.get("artist", {}).get("name")
-    info["album_name"] = track_data.get("album", {}).get("title")
-    info["album_type"] = album_data.get("record_type")
-    info["is_playable"] = track_data.get("readable")
-    info["item_id"] = track_data.get("id")
-
-    return info
+    logger.info("Get Deezer track metadata for %s", item_id)
+    track = make_call(f"{BASE_URL}/track/{item_id}")
+    if str(track.get("id")) != str(item_id):
+        raise TrackUnavailableError("Deezer metadata does not match the requested recording.")
+    album_id = (track.get("album") or {}).get("id")
+    album = make_call(f"{BASE_URL}/album/{album_id}?limit=10000")
+    album_tracks = make_call(f"{BASE_URL}/album/{album_id}/tracks?limit=10000")
+    tracks = _all_rows(album_tracks) or _all_rows(album.get("tracks") or {})
+    return normalize_metadata(track, album, tracks, config.get("metadata_separator", "; "))
 
 
 def get_song_info_from_deezer_website(token, track_id):
+    try:
+        response = token["session"].post(
+            "https://www.deezer.com/ajax/gw-light.php",
+            params={"api_version": "1.0", "api_token": token.get("api_token", "null"),
+                    "input": "3", "method": "song.getData"},
+            json={"sng_id": str(track_id)}, timeout=HTTP_TIMEOUT,
+        )
+        response.raise_for_status()
+        song = response.json().get("results") or {}
+        if song.get("TRACK_TOKEN"):
+            return song
+    except (requests.RequestException, ValueError, AttributeError):
+        pass
     url = f"https://www.deezer.com/us/track/{track_id}"
     session = token["session"]
     resp = session.get(url, timeout=HTTP_TIMEOUT)
+    resp.raise_for_status()
     if resp.status_code == 404:
         logger.info(f"Received 404 while fetching MD5_ORIGIN, {url}")
     if "MD5_ORIGIN" not in resp.text:
@@ -159,6 +145,8 @@ def get_song_info_from_deezer_website(token, track_id):
         if regex:
             DZR_APP_STATE = json.loads(regex.group())
             songs.append(DZR_APP_STATE["DATA"])
+    if not songs:
+        raise TrackUnavailableError("Deezer did not provide recording data.")
     return songs[0]
 
 
@@ -242,35 +230,7 @@ def deezer_login_user(account):
 
     try:
         if uuid == "public_deezer":
-            # I have no idea why rentry 403s every scraping trick I've tried
-            ia_url = "http://archive.org/wayback/available?url=https://rentry.co/firehawk52"
-            response = requests.get(ia_url, timeout=HTTP_TIMEOUT)
-            if response.status_code != 200:
-                logger.error(
-                    "Unable to fetch public Deezer account from Internet Archive, status code: %s",
-                    response.status_code,
-                )
-                response.raise_for_status()
-            data = response.json()
-
-            # Sometimes returns with info missing
-            try:
-                url = data["archived_snapshots"]["closest"]["url"]
-            except Exception:
-                url = "http://web.archive.org/web/20241206020314/https://rentry.co/firehawk52"
-
-            html_content = requests.get(url, timeout=HTTP_TIMEOUT).text
-
-            table_match = re.search(r'<table class="ntable">(.*?)</table>', html_content, re.DOTALL)
-            if table_match:
-                table_content = table_match.group(1)
-                rows = re.findall(r"<tr>(.*?)</tr>", table_content, re.DOTALL)
-
-                public_arls = []
-                for row in rows[1:]:
-                    public_arl = re.search(r"<code>(.*?)</code>", row)
-                    public_arls.append(public_arl.group(1))
-                arl = random.choice(public_arls)
+            raise ValueError("Add your own Deezer account; shared ARL scraping is disabled.")
 
         headers = {
             "Origin": "https://www.deezer.com",
@@ -289,7 +249,7 @@ def deezer_login_user(account):
         }
 
         user_data = session.post(
-            "http://www.deezer.com/ajax/gw-light.php",
+            "https://www.deezer.com/ajax/gw-light.php",
             params=params,
             headers=headers,
             timeout=HTTP_TIMEOUT,
@@ -310,7 +270,7 @@ def deezer_login_user(account):
         account_pool.append(
             {
                 "uuid": uuid,
-                "username": arl,
+                "username": "Deezer account",
                 "service": "deezer",
                 "status": "active",
                 "account_type": account_type,
@@ -318,17 +278,18 @@ def deezer_login_user(account):
                 "login": {
                     "arl": arl,
                     "license_token": user_data["results"]["USER"]["OPTIONS"]["license_token"],
+                    "api_token": user_data["results"].get("checkForm", "null"),
                     "session": session,
                 },
             }
         )
         return True
     except Exception as e:
-        logger.error(f"Unknown Exception: {str(e)}")
+        logger.error("Deezer account login failed (%s)", type(e).__name__)
         account_pool.append(
             {
                 "uuid": uuid,
-                "username": arl,
+                "username": "Deezer account",
                 "service": "deezer",
                 "status": "error",
                 "account_type": "N/A",
@@ -364,7 +325,7 @@ def deezer_get_search_results(_, search_term, content_types):
         for track in track_search["data"]:
             search_results.append(
                 {
-                    "item_id": track["id"],
+                    "item_id": str(track["id"]),
                     "item_name": track["title"],
                     "item_by": track["artist"]["name"],
                     "item_type": "track",
@@ -379,7 +340,7 @@ def deezer_get_search_results(_, search_term, content_types):
         for album in album_search["data"]:
             search_results.append(
                 {
-                    "item_id": album["id"],
+                    "item_id": str(album["id"]),
                     "item_name": album["title"],
                     "item_by": album["artist"]["name"],
                     "item_type": "album",
@@ -394,7 +355,7 @@ def deezer_get_search_results(_, search_term, content_types):
         for artist in artist_search["data"]:
             search_results.append(
                 {
-                    "item_id": artist["id"],
+                    "item_id": str(artist["id"]),
                     "item_name": artist["name"],
                     "item_by": artist["name"],
                     "item_type": "artist",
@@ -409,7 +370,7 @@ def deezer_get_search_results(_, search_term, content_types):
         for playlist in playlist_search["data"]:
             search_results.append(
                 {
-                    "item_id": playlist["id"],
+                    "item_id": str(playlist["id"]),
                     "item_name": playlist["title"],
                     "item_by": playlist["user"]["name"],
                     "item_type": "playlist",

@@ -293,6 +293,10 @@ class Config:
                 }
             )
         snapshot["accounts"] = accounts
+        for key in CREDENTIAL_KEYS - {"accounts"}:
+            if key in snapshot:
+                snapshot[key + "_configured"] = bool(snapshot[key])
+                snapshot[key] = ""
 
         return snapshot
 

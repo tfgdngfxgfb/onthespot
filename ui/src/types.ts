@@ -262,6 +262,7 @@ export type QueueItemStatus =
       length?: number;
       file_size?: string;
       bitrate?: number;
+      source_quality?: string;
       local_id: number;
       item_service: string;
       item_type: string;
@@ -391,11 +392,11 @@ export interface SystemDiagnostics {
     heap_used_mb: number;
   };
   workers: {
-    queue_worker_active: boolean;
-    download_workers_running: number;
-    max_download_workers: number;
-    retry_worker_active: boolean;
-    active_workers_map: Record<string, boolean>;
+    parsing: boolean;
+    downloads: boolean;
+    accounts: boolean;
+    retry: boolean;
+    active_workers_map?: Record<string, boolean>;
   };
   queue: {
     total: number;

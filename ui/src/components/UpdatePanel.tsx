@@ -16,8 +16,6 @@ const formatSize = (bytes: number) => {
 export const UpdatePanel: React.FC<UpdatePanelProps> = ({ currentVersion }) => {
   const [status, setStatus] = useState<UpdateInfo | null>(null);
   const [checking, setChecking] = useState(true);
-  const [installing, setInstalling] = useState(false);
-  const [message, setMessage] = useState("");
 
   const check = useCallback(async (force = false) => {
     setChecking(true);
@@ -33,25 +31,6 @@ export const UpdatePanel: React.FC<UpdatePanelProps> = ({ currentVersion }) => {
     void check();
   }, [check]);
 
-  const install = async () => {
-    setInstalling(true);
-    setMessage("");
-    try {
-      const result = await installApplicationUpdate();
-      if (!result) {
-        setMessage("The update service could not be reached.");
-        return;
-      }
-      if (result.success) {
-        setMessage(result.message || "The update is ready. Daemon restarting…");
-        return;
-      }
-      setMessage(result.message || "Automatic installation is not available for this environment.");
-    } finally {
-      setInstalling(false);
-    }
-  };
-
   const assetUrl = status?.recommended_asset?.download_url || status?.release_url || "";
   const checkedAt = status?.checked_at ? new Date(status.checked_at * 1000).toLocaleTimeString() : "";
 
@@ -66,7 +45,7 @@ export const UpdatePanel: React.FC<UpdatePanelProps> = ({ currentVersion }) => {
             Keep OnTheSpot Current
           </h3>
           <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
-            Running version <span className="font-mono font-medium text-neutral-700 dark:text-neutral-300">v{currentVersion || "0.8.2-fastapi"}</span>. Background checks occur periodically.
+            Running version <span className="font-mono font-medium text-neutral-700 dark:text-neutral-300">v{currentVersion || "0.8.2-fastapi"}</span>. Update this source fork using git pull and setup.cmd.
           </p>
         </div>
         <button
@@ -105,18 +84,6 @@ export const UpdatePanel: React.FC<UpdatePanelProps> = ({ currentVersion }) => {
               </p>
             </div>
             <div className="flex items-center gap-2">
-              {status.install_supported && (
-                <button
-                  type="button"
-                  id="btn-install-restart-update"
-                  onClick={() => void install()}
-                  disabled={installing}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium transition cursor-pointer shadow-xs"
-                >
-                  {installing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-                  {installing ? "Installing…" : "Install & Restart"}
-                </button>
-              )}
               {assetUrl && (
                 <a
                   href={assetUrl}
@@ -133,19 +100,13 @@ export const UpdatePanel: React.FC<UpdatePanelProps> = ({ currentVersion }) => {
         ) : (
           <p className="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-300">
             <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
-            <span>You are on the latest release of OnTheSpot.</span>
-          </p>
-        )}
-
-        {message && (
-          <p className="mt-2.5 text-xs font-mono text-neutral-500 dark:text-neutral-400">
-            {message}
+            <span>No newer release was reported. This source fork is maintained with Git.</span>
           </p>
         )}
 
         {checkedAt && (
           <p className="mt-2 text-[10px] text-neutral-400 dark:text-neutral-500">
-            Last checked {checkedAt} · Repository: {status?.repository || "ots-downloader/onthespot"}
+            Last checked {checkedAt} · Repository: {status?.repository || "tfgdngfxgfb/onthespot"}
           </p>
         )}
       </div>

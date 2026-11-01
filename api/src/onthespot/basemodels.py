@@ -124,7 +124,7 @@ class AppSettings(BaseModel):
 
     language: str = "en_US"
     theme: str = "dark"
-    active_download_profile: str = "mp3-320"
+    active_download_profile: str = "flac"
     export_folder_path: str = ""
     playlist_backup_folder_path: str = ""
     youtube_auth_mode: str = "none"
@@ -145,7 +145,7 @@ class AppSettings(BaseModel):
     mirror_spotify_playback: bool = False
 
     check_for_updates: bool = True
-    update_repository: str = "ots-downloader/onthespot"
+    update_repository: str = "tfgdngfxgfb/onthespot"
     update_check_interval_hours: int = 12
     illegal_character_replacement: str = "-"
     raw_media_download: bool = False
@@ -201,7 +201,7 @@ class AppSettings(BaseModel):
     m3u_path_formatter: str = "M3U/{playlist_name} by {playlist_owner}"
     extinf_separator: str = "; "
     extinf_label: str = "{playlist_number}. {artist} - {name}"
-    save_album_cover: bool = False
+    save_album_cover: bool = True
     album_cover_format: str = "png"
     file_hertz: int = 44100
     use_custom_file_bitrate: bool = False
@@ -215,7 +215,7 @@ class AppSettings(BaseModel):
     metadata_separator: str = "; "
     overwrite_existing_metadata: bool = False
     embed_branding: bool = False
-    embed_cover: bool = True
+    embed_cover: bool = False
     embed_artist: bool = True
     embed_album: bool = True
     embed_albumartist: bool = True
@@ -288,6 +288,7 @@ class QueueItem(BaseModel):
     thumbnail: str = ""
     album: str = ""
     length: int = 0
+    source_quality: str = ""
     file_size: str = ""
     bitrate: int = 0
     local_id: int

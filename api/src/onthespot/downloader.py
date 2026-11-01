@@ -29,11 +29,12 @@ from .api.registry import (
 )
 from .basemodels import QueueItem
 from .constants import ItemStatus
-from .library import remember_item, verify_file
+from .deezer_lossless import LosslessUnavailable, inspect_flac
+from .deezer_metadata import write_deezer_tags
+from .library import remember_item
 from .otsconfig import config
 from .resources.exceptions import DownloadCancelled, TrackUnavailableError
 from .runtimedata import (
-    download_paused,
     download_queue,
     download_queue_lock,
     get_logger,
@@ -272,9 +273,11 @@ class DownloadWorker:
                         token,
                         temp_file_path,
                     )
-                except TrackUnavailableError:
+                except DownloadCancelled:
+                    raise
+                except TrackUnavailableError as exc:
                     logger.error("Track is unavailable", extra={"track_id": item_id})
-                    item.error = "The service marked this item as unavailable."
+                    item.error = str(exc) if isinstance(exc, LosslessUnavailable) else "The service marked this item as unavailable."
                     item.item_status = ItemStatus.UNAVAILABLE
                     progress_hook(item, 0, item.item_status)
                     requeue_item(item)
@@ -381,7 +384,9 @@ class DownloadWorker:
         This is an independent module taking into account all the settings for the user preferred format.
         """
         if item.item_type == "track":
-            if config.get("use_source_format") or config.get("raw_media_download"):
+            if item.item_service == "deezer":
+                item.target_format = "flac"
+            elif config.get("use_source_format") or config.get("raw_media_download"):
                 item.target_format = ""
             else:
                 item.target_format = item.download_profile.format
@@ -459,6 +464,14 @@ class DownloadWorker:
                 if entry_stem != base_stem or entry_ext in subtitle_exts:
                     continue
 
+                if service == "deezer":
+                    if entry_ext.lower() != ".flac":
+                        continue
+                    try:
+                        inspect_flac(os.path.join(file_directory, entry), config.get("_ffmpeg_bin_path"))
+                    except ValueError:
+                        raise RuntimeError("Existing FLAC is invalid; move it aside before retrying.") from None
+
                 # Existing file found
                 item.file_path = os.path.join(file_directory, entry)
 
@@ -498,6 +511,7 @@ class DownloadWorker:
 
     def _overwrite_metadata(self, item: QueueItem, item_metadata, service, item_id, item_type, token, file_path):
         """Re-embed lyrics, metadata, and thumbnail on an existing file."""
+
         # Lyrics
         lyrics_fn = SERVICE_LYRICS_FUNCTIONS.get(service)
         if lyrics_fn and config.get("download_lyrics"):
@@ -511,12 +525,15 @@ class DownloadWorker:
             embed_metadata(item.model_dump(), item_metadata)
             if config.get("save_album_cover") or config.get("embed_cover"):
                 progress_hook(item, 70, ItemStatus.SETTING_THUMBNAIL)
-                set_music_thumbnail(item.file_path, item_metadata)
+                set_music_thumbnail(item.file_path, item_metadata, allow_embed=service != "deezer")
             if os.path.splitext(item.file_path)[1] == ".mp3":
                 fix_mp3_metadata(item.file_path)
         elif config.get("save_album_cover"):
             progress_hook(item, 70, ItemStatus.SETTING_THUMBNAIL)
-            set_music_thumbnail(file_path, item_metadata)
+            set_music_thumbnail(item.file_path, item_metadata, allow_embed=service != "deezer")
+
+        if service == "deezer" and not config.get("raw_media_download"):
+            write_deezer_tags(item.file_path, item_metadata, config.get)
 
     # ------------------------------------------------------------------
     # Service-specific download helpers
@@ -630,6 +647,8 @@ class DownloadWorker:
                 os.remove(temp_file_path)
             raise RuntimeError(f"Corrupt or incomplete download detected ({size} bytes)")
 
+        source_quality = inspect_flac(temp_file_path) if service == "deezer" else None
+
         # Lyrics
         lyrics_fn = SERVICE_LYRICS_FUNCTIONS.get(service)
         if lyrics_fn and config.get("download_lyrics"):
@@ -639,12 +658,14 @@ class DownloadWorker:
                 item_metadata.update(extra)
 
         # Rename temp file to final path with correct extension
-        target_format = item.target_format
+        target_format = "flac" if service == "deezer" else item.target_format
+        if service == "deezer":
+            item.target_format = "flac"
         target_bitrate = item.download_profile.bitrate
 
         if item_type == "track":
             if target_format == temp_file_format.strip("."):
-                if target_bitrate == temp_file_bitrate.strip("k"):
+                if service == "deezer" or str(target_bitrate) == temp_file_bitrate.strip("k"):
                     force_bitrate = False
                 else:
                     force_bitrate = True
@@ -676,14 +697,25 @@ class DownloadWorker:
 
             if config.get("save_album_cover") or config.get("embed_cover"):
                 progress_hook(item, 80, ItemStatus.SETTING_THUMBNAIL)
-                set_music_thumbnail(final_path, item_metadata)
+                set_music_thumbnail(final_path, item_metadata, allow_embed=service != "deezer")
 
             if os.path.splitext(final_path)[1] == ".mp3":
                 fix_mp3_metadata(final_path)
 
         elif config.get("save_album_cover"):
             progress_hook(item, 80, ItemStatus.SETTING_THUMBNAIL)
-            set_music_thumbnail(final_path, item_metadata)
+            set_music_thumbnail(final_path, item_metadata, allow_embed=service != "deezer")
+
+        if service == "deezer":
+            if not config.get("raw_media_download"):
+                write_deezer_tags(final_path, item_metadata, config.get)
+            delivered = inspect_flac(final_path)
+            if delivered != source_quality:
+                raise RuntimeError("Final FLAC differs from the verified source resolution or audio checksum.")
+            item_metadata["source_quality"] = delivered.description
+            item.source_quality = delivered.description
+            target_bitrate = round(delivered.bits * delivered.rate * delivered.channels / 1000)
+            logger.info("Final audio verified: %s", delivered.description)
 
         # M3U
         if config.get("create_m3u_file") and item.parent_category == "playlist":
